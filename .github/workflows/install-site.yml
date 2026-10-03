@@ -1,0 +1,77 @@
+name: Install ARISE ARC site payload
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    if: startsWith(github.event.head_commit.message, 'Install uploaded ARISE ARC site payload')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore uploaded site and ebook
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, tarfile, io, subprocess, shutil
+
+          root = Path(".")
+          payload = root / "payload"
+
+          def join_parts(prefix):
+              parts = sorted(payload.glob(f"{prefix}-*.b64"))
+              if not parts:
+                  raise SystemExit(f"missing payload parts for {prefix}")
+              encoded = "".join(p.read_text(encoding="ascii").strip() for p in parts)
+              return base64.b64decode(encoded)
+
+          site_bytes = gzip.decompress(join_parts("site"))
+          with tarfile.open(fileobj=io.BytesIO(site_bytes), mode="r:") as archive:
+              archive.extractall(root)
+
+          docx_bytes = gzip.decompress(join_parts("book"))
+          tmpdoc = Path("/tmp/The_Arise_Arc_Ebook.docx")
+          tmpdoc.write_bytes(docx_bytes)
+
+          if shutil.which("libreoffice") is None:
+              subprocess.run(["sudo","apt-get","update"], check=True)
+              subprocess.run(["sudo","apt-get","install","-y","libreoffice"], check=True)
+
+          subprocess.run([
+              "libreoffice","--headless","--convert-to","pdf",
+              "--outdir", str(root), str(tmpdoc)
+          ], check=True)
+
+          generated = root / "The_Arise_Arc_Ebook.pdf"
+          if not generated.exists():
+              raise SystemExit("PDF conversion failed: The_Arise_Arc_Ebook.pdf missing")
+
+          shutil.rmtree(payload)
+
+          workflow = root / ".github" / "workflows" / "install-site.yml"
+          workflow.unlink(missing_ok=True)
+          try:
+              workflow.parent.rmdir()
+              workflow.parent.parent.rmdir()
+          except OSError:
+              pass
+          PY
+
+      - name: Commit installed files
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Install uploaded ARISE ARC site"
+          git push
